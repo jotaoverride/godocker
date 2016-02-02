@@ -14,18 +14,16 @@ type ContainerID string
 // fail on error.
 func StartContainer(image string) (c ContainerID, err error) {
 	err = dockerStart()
-	if err != nil {
-		return
+	if err == nil {
+		err = checkImage(image)
+		if err == nil {
+			containerID, err := run(image)
+			if err == nil {
+				return ContainerID(containerID), nil
+			}
+		}
 	}
-	err = checkImage(image)
-	if err != nil {
-		return
-	}
-	containerID, err := run(image)
-	if err != nil {
-		return
-	}
-	return ContainerID(containerID), err
+	return
 }
 
 func (c ContainerID) IP() (ip string, err error) {
@@ -37,37 +35,41 @@ func (c ContainerID) IP() (ip string, err error) {
 	default:
 		fmt.Errorf("uname not soported: %v", string(uname))
 	}
-	return
+	return ip, err
 }
 
 func (c ContainerID) GetPort(cPort string) (dockerPort string, err error) {
 	out, err := exec.Command("docker", "inspect", "--format", `{{ (index (index .NetworkSettings.Ports "`+cPort+`/tcp") 0).HostPort }}`, string(c)).Output()
-	if err == nil {
-		dockerPort = strings.TrimSpace(string(out))
+	if err != nil {
+		err = fmt.Errorf("Error getting port mapping for %s: %v", cPort, err)
+		return "", err
 	}
-	return
+	dockerPort = strings.TrimSpace(string(out))
+	return dockerPort, nil
 }
 
 // KillRemove calls Kill on the container, and then Remove if there was
 // no error. It logs any error to t.
-func (c ContainerID) KillRemove() error {
-	if err := c.Kill(); err != nil {
-		return err
+func (c ContainerID) KillRemove() (err error) {
+	err = c.Kill()
+	if err == nil {
+		err = c.Remove()
 	}
-	if err := c.Remove(); err != nil {
-		return err
-	}
-	return nil
+	return
 }
 
+// Kill runs "docker kill" on the container
 func (c ContainerID) Kill() error {
 	return killContainer(string(c))
 }
 
 // Remove runs "docker rm" on the container
-func (c ContainerID) Remove() error {
-	if Debug {
-		return nil
+func (c ContainerID) Remove() (err error) {
+	if !Debug {
+		err = exec.Command("docker", "rm", "-v", string(c)).Run()
+		if err != nil {
+			err = fmt.Errorf("Error removing %s: %v", c, err)
+		}
 	}
-	return exec.Command("docker", "rm", "-v", string(c)).Run()
+	return
 }

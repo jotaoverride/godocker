@@ -21,29 +21,28 @@ var (
 	pwd                    = os.Getenv("GOPATH") + "/src/github.com/mercadolibre/godocker/"
 )
 
-// runLongTest checks all the conditions for running a docker container
-// based on image.
-func dockerStart() (err error) {
-	_, err = exec.Command(pwd+"docker-start.sh").Output()
-	setDockerEnv()
-	return
-}
-
-func checkImage(image string) (err error)  {
-	if ok, err := haveImage(image); !ok || err != nil {
-		if err != nil {
-			err = errors.New(fmt.Sprintf("Error running docker to check for %s: %v", image, err))
-			return err
-		}
-		log.Printf("Pulling docker image %s ... this can take a while but only happen the first time.", image)
-		if err := pull(image); err != nil {
-			err = errors.New(fmt.Sprintf("Error pulling %s: %v", image, err))
-			return err
-		}
+// dockerStart checks all the conditions for running docker and sets the environment variables.
+func dockerStart() error {
+	err := exec.Command(pwd + "docker-start.sh").Run()
+	if err != nil {
+		err = fmt.Errorf("Error starting docker-machine: %v", err)
+		return err
 	}
-	return
+	setDockerEnv()
+	return nil
 }
 
+// checkImage checks the image on the repository and pull it if necessary.
+func checkImage(image string) (err error) {
+	ok, err := haveImage(image)
+	if !ok && err == nil {
+		log.Printf("Pulling docker image '%s'... this can take a while but only happen the first time.", image)
+		err = pull(image)
+	}
+	return err
+}
+
+// setDockerEnv sets the environment variables.
 func setDockerEnv() {
 	stdout, _ := exec.Command("docker-machine", "env", "default").Output()
 	exports := regexp.MustCompile(`export (.+)="(.+)"`).FindAllStringSubmatch(string(stdout), -1)
@@ -53,41 +52,50 @@ func setDockerEnv() {
 	return
 }
 
-func haveImage(name string) (ok bool, err error) {
+// haveImage checks for the image in the repositories.
+func haveImage(name string) (bool, error) {
 	out, err := exec.Command("docker", "images", "--no-trunc").Output()
 	if err != nil {
-		return
+		return false, fmt.Errorf("Error running docker to check for image '%s': %v", name, err)
 	}
 	return bytes.Contains(out, []byte(name)), nil
 }
 
-// Pull retrieves the docker image with 'docker pull'.
+// pull retrieves the docker image with 'docker pull'.
 func pull(image string) error {
-	out, err := exec.Command("docker", "pull", image).CombinedOutput()
+	err := exec.Command("docker", "pull", image).Run()
 	if err != nil {
-		err = fmt.Errorf("%v: %s", err, out)
+		return fmt.Errorf("Error pulling image '%s': %v", image, err)
 	}
-	return err
+	return nil
+
 }
 
-// Remove runs "docker rmi" on the container
-func removeImage(image string) (err error) {
-	out, err := exec.Command("docker", "rmi", image).CombinedOutput()
+// removeImage remove one image.
+func removeImage(image string) error {
+	err := exec.Command("docker", "rmi", image).Run()
 	if err != nil {
-		err = fmt.Errorf("%v: %s", err, out)
+		return fmt.Errorf("Error removing image '%s': %v", image, err)
 	}
-	return err
+	return nil
 }
 
+// run a command in a new container.
 func run(args ...string) (c ContainerID, err error) {
 	stdout, err := exec.Command("docker", append([]string{"run", "-dP"}, args...)...).Output()
-	c = ContainerID(strings.TrimSpace(string(stdout)))
-	return
+	if err != nil {
+		return "", fmt.Errorf("Error running %s: %v", strings.Join(args, " "), err)
+	}
+	return ContainerID(strings.TrimSpace(string(stdout))), nil
 }
 
+// killContainer kills a running container.
 func killContainer(container string) error {
-	_, err := exec.Command("docker", "kill", container).CombinedOutput()
-	return err
+	err := exec.Command("docker", "kill", container).Run()
+	if err != nil {
+		return fmt.Errorf("Error killing %s: %v", container, err)
+	}
+	return nil
 }
 
 // DockerIP returns the IP address of docker-machine.
@@ -96,17 +104,16 @@ func DockerIP() (ip string, err error) {
 	if match := re.FindStringSubmatch(os.Getenv("DOCKER_HOST")); match != nil {
 		ip = match[1]
 	} else {
-		err = fmt.Errorf("error getting IP: Can't parse $DOCKER_HOST ( " + os.Getenv("DOCKER_HOST") + " )")
+		err = fmt.Errorf("Error getting docker IP: Can't parse $DOCKER_HOST (" + os.Getenv("DOCKER_HOST") + ")")
 	}
-	return
+	return ip, err
 }
 
-// containerIP returns the IP address of the container.
-// This is for Linux. TODO: Check it works
+// containerIP returns the IP address of the container. This is for Linux. TODO: Check it works
 func containerIP(containerID string) (string, error) {
 	out, err := exec.Command("docker", "inspect", "--format", "'{{ .NetworkSettings.IPAddress }}'", containerID).Output()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("Error getting '%s' IP: %v", containerID, err)
 	}
 	ip := strings.Trim(string(out), "'\n")
 	if len(ip) < len("0.0.0.0") {
