@@ -9,225 +9,108 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"os/exec"
 	"regexp"
-	"strconv"
 	"strings"
-	"time"
 )
 
-// Debug, if set, prevents any container from being removed.
-var Debug bool
+var (
+	Debug                  bool // Debug, if set, prevents any container from being removed.
+	DockerMachineAvailable bool
+	pwd                    = os.Getenv("GOPATH") + "/src/github.com/mercadolibre/godocker/"
+)
 
 // runLongTest checks all the conditions for running a docker container
 // based on image.
-func runLongTest(image string) error {
-
-	if !haveDocker() {
-		return errors.New("skipping test; 'docker' command not found")
-	}
-
-	if ok, err := haveImage(image); !ok || err != nil {
-
-		if err != nil {
-			return errors.New(fmt.Sprintln("Error running docker to check for %s: %v", image, err))
-		}
-
-		log.Printf("Pulling docker image %s ...", image)
-		if err := Pull(image); err != nil {
-			return errors.New(fmt.Sprintln("Error pulling %s: %v", image, err))
-		}
-	}
-
-	return nil
+func dockerStart() (err error) {
+	_, err = exec.Command(pwd+"docker-start.sh").Output()
+	setDockerEnv()
+	return
 }
 
-// haveDocker returns whether the "docker" command was found.
-func haveDocker() bool {
-	_, err := exec.LookPath("docker")
-	return err == nil
+func checkImage(image string) (err error)  {
+	if ok, err := haveImage(image); !ok || err != nil {
+		if err != nil {
+			err = errors.New(fmt.Sprintf("Error running docker to check for %s: %v", image, err))
+			return err
+		}
+		log.Printf("Pulling docker image %s ... this can take a while but only happen the first time.", image)
+		if err := pull(image); err != nil {
+			err = errors.New(fmt.Sprintf("Error pulling %s: %v", image, err))
+			return err
+		}
+	}
+	return
+}
+
+func setDockerEnv() {
+	stdout, _ := exec.Command("docker-machine", "env", "default").Output()
+	exports := regexp.MustCompile(`export (.+)="(.+)"`).FindAllStringSubmatch(string(stdout), -1)
+	for _, export := range exports {
+		os.Setenv(export[1], export[2])
+	}
+	return
 }
 
 func haveImage(name string) (ok bool, err error) {
 	out, err := exec.Command("docker", "images", "--no-trunc").Output()
-
 	if err != nil {
 		return
 	}
-
 	return bytes.Contains(out, []byte(name)), nil
 }
 
-func run(args ...string) (containerID string, err error) {
-
-	cmd := exec.Command("docker", append([]string{"run"}, args...)...)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-
-	if err = cmd.Run(); err != nil {
-
-		err = fmt.Errorf("%v%v", stderr.String(), err)
-		return
-	}
-
-	containerID = strings.TrimSpace(stdout.String())
-
-	if containerID == "" {
-		return "", errors.New("unexpected empty output from `docker run`")
-	}
-
-	return
-}
-
-func KillContainer(container string) error {
-	return exec.Command("docker", "kill", container).Run()
-}
-
 // Pull retrieves the docker image with 'docker pull'.
-func Pull(image string) error {
+func pull(image string) error {
 	out, err := exec.Command("docker", "pull", image).CombinedOutput()
-
 	if err != nil {
 		err = fmt.Errorf("%v: %s", err, out)
 	}
-
 	return err
 }
 
-type ContainerID string
-
-func (c ContainerID) Kill() error {
-	return KillContainer(string(c))
-}
-
-// Remove runs "docker rm" on the container
-func (c ContainerID) Remove() error {
-	if Debug {
-		return nil
-	}
-	return exec.Command("docker", "rm", "-v", string(c)).Run()
-}
-
-// KillRemove calls Kill on the container, and then Remove if there was
-// no error. It logs any error to t.
-func (c ContainerID) KillRemove() error {
-	if err := c.Kill(); err != nil {
-		return err
-	}
-	if err := c.Remove(); err != nil {
-		return err
-	}
-	return nil
-}
-
-// lookup retrieves the ip address of the container, and tries to reach
-// before timeout the tcp address at this ip and given port.
-func (c ContainerID) lookup(port int, timeout time.Duration) (ip string, err error) {
-	ip, err = "192.168.99.100", nil //c.IP()
+// Remove runs "docker rmi" on the container
+func removeImage(image string) (err error) {
+	out, err := exec.Command("docker", "rmi", image).CombinedOutput()
 	if err != nil {
-		err = fmt.Errorf("error getting IP: %v", err)
-		return
+		err = fmt.Errorf("%v: %s", err, out)
 	}
-	addr := fmt.Sprintf("%s:%d", ip, port)
-	fmt.Println(addr)
-	err = awaitReachable(addr, timeout)
+	return err
+}
+
+func run(args ...string) (c ContainerID, err error) {
+	stdout, err := exec.Command("docker", append([]string{"run", "-dP"}, args...)...).Output()
+	c = ContainerID(strings.TrimSpace(string(stdout)))
 	return
 }
 
-// AwaitReachable tries to make a TCP connection to addr regularly.
-// It returns an error if it's unable to make a connection before maxWait.
-func awaitReachable(addr string, maxWait time.Duration) error {
-	done := time.Now().Add(maxWait)
-	for time.Now().Before(done) {
-		c, err := net.Dial("tcp", addr)
-		if err == nil {
-			c.Close()
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return fmt.Errorf("%v unreachable for %v", addr, maxWait)
+func killContainer(container string) error {
+	_, err := exec.Command("docker", "kill", container).CombinedOutput()
+	return err
 }
 
-const (
-	memcached = "memcached"
-)
-
-// setupContainer sets up a container, using the start function to run the given image.
-// It also looks up the IP address of the container, and tests this address with the given
-// port and timeout. It returns the container ID and its IP address, or makes the test
-// fail on error.
-func SetupContainer(image string, getPort func(ContainerID) (int, error), timeout time.Duration, start func() (string, error)) (c ContainerID, ip string, port int, err error) {
-
-	err = runLongTest(image)
-
-	containerID, err := start()
-	if err != nil {
-		return
+// DockerIP returns the IP address of docker-machine.
+func DockerIP() (ip string, err error) {
+	re := regexp.MustCompile(`tcp://(.+):`)
+	if match := re.FindStringSubmatch(os.Getenv("DOCKER_HOST")); match != nil {
+		ip = match[1]
+	} else {
+		err = fmt.Errorf("error getting IP: Can't parse $DOCKER_HOST ( " + os.Getenv("DOCKER_HOST") + " )")
 	}
-
-	c = ContainerID(containerID)
-
-	port, err = getPort(c)
-	if err != nil {
-		return
-	}
-
-	ip, err = c.lookup(port, timeout)
-	if err != nil {
-		c.KillRemove()
-		return c, "", 0, errors.New(fmt.Sprintln("Skipping test for container %s: %s", c, err))
-	}
-
 	return
 }
 
-func startMemcache() (string, error) {
-	return run("-d", "-p", ":11211", memcached)
-}
-
-func SetupMemcachedContainer() (c ContainerID, ip string, port int, err error) {
-	setDockerEnv()
-	return SetupContainer(memcached, getMemcachedPort, 2*time.Second, startMemcache)
-}
-
-func setDockerEnv() {
-	cmd := exec.Command("docker-machine", "env", "default")
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-
-	if err := cmd.Run(); err != nil {
-		err = fmt.Errorf("%v%v", stderr.String(), err)
-		return
+// containerIP returns the IP address of the container.
+// This is for Linux. TODO: Check it works
+func containerIP(containerID string) (string, error) {
+	out, err := exec.Command("docker", "inspect", "--format", "'{{ .NetworkSettings.IPAddress }}'", containerID).Output()
+	if err != nil {
+		return "", err
 	}
-
-	re := regexp.MustCompile(`export (.+)="(.+)"`)
-	exports := re.FindAllStringSubmatch(stdout.String(), -1)
-
-	for _, export := range exports {
-		os.Setenv(export[1], export[2])
+	ip := strings.Trim(string(out), "'\n")
+	if len(ip) < len("0.0.0.0") {
+		return "", errors.New("No IP output from docker inspect")
 	}
-}
-
-func getMemcachedPort(c ContainerID) (port int, err error) {
-
-	cmd := exec.Command("docker", "port", string(c))
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-
-	if err = cmd.Run(); err != nil {
-
-		err = fmt.Errorf("%v%v", stderr.String(), err)
-		return
-	}
-
-	re := regexp.MustCompile(":[0-9]+")
-	port, _ = strconv.Atoi(re.FindString(stdout.String())[1:])
-
-	return
+	return ip, nil
 }
