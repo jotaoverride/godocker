@@ -15,7 +15,7 @@ type ContainerID string
 func StartContainer(image string) (c ContainerID, err error) {
 	err = dockerStart()
 	if err == nil {
-		err = checkImage(image)
+		err = checkImage(strings.Split(image, ":")[0])
 		if err == nil {
 			containerID, err := run(image)
 			if err == nil {

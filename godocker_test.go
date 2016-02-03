@@ -4,8 +4,10 @@ import (
 	"github.com/mercadolibre/gomemcacheclient"
 	"github.com/stretchr/testify/assert"
 	"log"
+	"net"
 	"os"
 	"testing"
+	"time"
 )
 
 func TestDeleteAndPullMemcache(t *testing.T) {
@@ -127,4 +129,28 @@ func TestGetIPForInvalidContainer(t *testing.T) {
 	ip, err := containerIP("jota-rules")
 	assert.Equal(t, "Error getting 'jota-rules' IP: exit status 1", err.Error())
 	assert.Empty(t, ip)
+}
+
+func TestRabbit(t *testing.T) {
+	container, err := StartContainer("rabbitmq:3-management")
+	assert.Nil(t, err)
+	assert.NotEmpty(t, string(container))
+
+	ip, err := container.IP()
+	assert.Nil(t, err)
+	assert.True(t, len(ip) >= len("0.0.0.0"))
+
+	port, err := container.GetPort("15672")
+	assert.Nil(t, err)
+	assert.NotEmpty(t, port)
+
+	time.Sleep(5 * time.Second)
+
+	conn, err := net.Dial("tcp", ip+":"+port)
+	assert.Nil(t, err)
+	err = conn.Close()
+	assert.Nil(t, err)
+
+	err = container.KillRemove()
+	assert.Nil(t, err)
 }
